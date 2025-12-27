@@ -1,0 +1,133 @@
+// ======================================================
+// Annual NDVI for Sonadia Island (2000-2024)
+// Using MODIS/061/MOD13Q1 (250m, 16-day composite)
+// Annual mean NDVI calculated from all available composites
+// ======================================================
+
+// --- Sonadia Island geometry ---
+var geometry = ee.FeatureCollection("projects/ee-mohammadoney/assets/SonadiaIsland_Export");
+var sonadiaBounds = geometry.geometry().bounds();
+
+// Print info
+print('Sonadia Island bounds:', sonadiaBounds);
+print('Area (km²):', sonadiaBounds.area(1).divide(1e6)); // FIXED: Added error margin of 1
+
+// --- Parameters ---
+var startYear = 2000;  // MOD13Q1 starts from 2000
+var endYear = 2024;
+var productId = 'MODIS/061/MOD13Q1';
+var ndviBand = 'NDVI';
+var scaleMeters = 250;  // MOD13Q1 native resolution
+var driveFolder = 'earthengine';
+var fileNamePrefix = 'SONADIA_ANNUAL_MEAN_NDVI_2000_2024_250m';
+var maxPixels = 1e13;
+
+// --- Function to scale MODIS NDVI ---
+function scaleModisNdvi(image) {
+  // MOD13Q1 NDVI is scaled by 0.0001, range -2000 to 10000
+  // We'll keep it as float for better precision
+  var ndvi = image.select(ndviBand).multiply(0.0001).rename('NDVI_scaled');
+  return image.addBands(ndvi);
+}
+
+// --- Create annual mean NDVI images ---
+var annualImages = [];
+
+for (var y = startYear; y <= endYear; y++) {
+  var startDate = ee.Date.fromYMD(y, 1, 1);
+  var endDate = ee.Date.fromYMD(y, 12, 31);
+  
+  // Load and process MODIS data for the year
+  var annualNdvi = ee.ImageCollection(productId)
+    .filterDate(startDate, endDate)
+    .filterBounds(geometry)
+    .map(scaleModisNdvi)
+    .select('NDVI_scaled')
+    .mean()  // Annual mean NDVI
+    .clip(geometry)
+    .rename('NDVI_' + y);
+  
+  // Add year as property
+  annualNdvi = annualNdvi.set({
+    'year': y,
+    'type': 'annual_mean',
+    'data_source': productId
+  });
+  
+  annualImages.push(annualNdvi);
+}
+
+// Convert to ImageCollection
+var annualCollection = ee.ImageCollection(annualImages);
+print('Number of annual images:', annualCollection.size());
+print('Years processed:', startYear, 'to', endYear);
+
+// --- Visualize ---
+Map.centerObject(geometry, 12);
+Map.addLayer(geometry, {color: 'white', fillColor: '00000000', width: 2}, 'Sonadia Boundary');
+
+// Visualize first, middle, and last years
+var firstYear = ee.Image(annualImages[0]);
+var midYear = ee.Image(annualImages[Math.floor(annualImages.length/2)]);
+var lastYear = ee.Image(annualImages[annualImages.length-1]);
+
+Map.addLayer(firstYear, {
+  min: -0.2,
+  max: 0.8,
+  palette: ['brown', 'yellow', 'green']
+}, 'NDVI ' + startYear);
+
+Map.addLayer(midYear, {
+  min: -0.2,
+  max: 0.8,
+  palette: ['brown', 'yellow', 'green']
+}, 'NDVI ' + Math.floor((startYear + endYear)/2));
+
+Map.addLayer(lastYear, {
+  min: -0.2,
+  max: 0.8,
+  palette: ['brown', 'yellow', 'green']
+}, 'NDVI ' + endYear);
+
+var statsList = annualImages.map(function(image, index) {
+  var year = startYear + index;
+  var stats = image.reduceRegion({
+    reducer: ee.Reducer.mean().combine({
+      reducer2: ee.Reducer.stdDev(),
+      sharedInputs: true
+    }),
+    geometry: geometry,
+    scale: scaleMeters,
+    maxPixels: 1e9
+  });
+  
+  return ee.Feature(null, {
+    'year': year,
+    'mean_ndvi': stats.get('NDVI_' + year + '_mean'),
+    'std_ndvi': stats.get('NDVI_' + year + '_stdDev')
+  });
+});
+
+var statsCollection = ee.FeatureCollection(statsList);
+print('Annual statistics:', statsCollection);
+
+// --- Stack into multi-band image ---
+var stacked = annualCollection.toBands();
+print('Total bands:', stacked.bandNames().length());
+print('Band names:', stacked.bandNames());
+
+// --- Export to Drive ---
+Export.image.toDrive({
+  image: stacked,
+  description: fileNamePrefix,
+  folder: driveFolder,
+  fileNamePrefix: fileNamePrefix,
+  region: sonadiaBounds,
+  scale: scaleMeters,
+  crs: 'EPSG:4326',
+  maxPixels: maxPixels,
+  fileFormat: 'GeoTIFF',
+  formatOptions: {
+    cloudOptimized: true
+  }
+});
