@@ -1,0 +1,122 @@
+# Install required packages
+!pip install rasterio numpy  scipy statsmodels pysal esda matplotlib seaborn pandas geopandas rioxarray cartopy
+
+!pip install rasterio
+
+import rasterio
+import numpy as np
+
+path = "/content/drive/MyDrive/earthengine/SONADIA_ANNUAL_MEAN_NDVI_2000_2024_250m.tif"
+
+with rasterio.open(path) as src:
+    data = src.read(1)  # first band as 2D array
+    nodata = src.nodata
+
+# Build missing-data mask
+if nodata is not None:
+    missing_mask = (data == nodata) | np.isnan(data)
+else:
+    missing_mask = np.isnan(data)
+
+missing_count = np.count_nonzero(missing_mask)
+total_count = data.size
+
+print(f"Total pixels: {total_count}")
+print(f"Missing pixels: {missing_count}")
+print("Any missing data?", missing_count > 0)
+with rasterio.open(path) as src:
+    data = src.read()  # shape: (bands, rows, cols)
+    nodata = src.nodata
+
+if nodata is not None:
+    missing_mask = (data == nodata) | np.isnan(data)
+else:
+    missing_mask = np.isnan(data)
+
+missing_count = np.count_nonzero(missing_mask)
+total_count = data.size
+
+print(f"Total pixels (all bands): {total_count}")
+print(f"Missing pixels (all bands): {missing_count}")
+print("Any missing data?", missing_count > 0)
+
+import rasterio
+from rasterio.fill import fillnodata
+import numpy as np
+
+path_in = "/content/drive/MyDrive/earthengine/SONADIA_ANNUAL_MEAN_NDVI_2000_2024_250m.tif"
+path_out = "/content/drive/MyDrive/earthengine/SONADIA_ANNUAL_MEAN_NDVI_2000_2024_250m_filled.tif"
+
+with rasterio.open(path_in) as src:
+    profile = src.profile
+    nodata = src.nodata
+    data = src.read()  # (bands, rows, cols)
+
+filled = np.empty_like(data)
+
+for b in range(data.shape[0]):
+    band = data[b]
+    if nodata is not None:
+        mask = band != nodata       # valid data >0 in mask
+        band = band.astype("float32")
+        band[~mask] = nodata
+        filled_band = fillnodata(
+            band,
+            mask=mask,
+            max_search_distance=50,  # adjust if needed
+            smoothing_iterations=1
+        )
+    else:
+        band = band.astype("float32")
+        mask = ~np.isnan(band)
+        filled_band = fillnodata(
+            band,
+            mask=mask,
+            max_search_distance=50,
+            smoothing_iterations=1
+        )
+    filled[b] = filled_band
+
+profile.update(nodata=nodata)
+
+with rasterio.open(path_out, "w", **profile) as dst:
+    dst.write(filled)
+!pip install rasterio
+
+import rasterio
+import numpy as np
+
+path = "/content/drive/MyDrive/earthengine/SONADIA_ANNUAL_MEAN_NDVI_2000_2024_250m_filled.tif"
+
+with rasterio.open(path) as src:
+    data = src.read(1)  # first band as 2D array
+    nodata = src.nodata
+
+# Build missing-data mask
+if nodata is not None:
+    missing_mask = (data == nodata) | np.isnan(data)
+else:
+    missing_mask = np.isnan(data)
+
+missing_count = np.count_nonzero(missing_mask)
+total_count = data.size
+
+print(f"Total pixels: {total_count}")
+print(f"Missing pixels: {missing_count}")
+print("Any missing data?", missing_count > 0)
+with rasterio.open(path) as src:
+    data = src.read()  # shape: (bands, rows, cols)
+    nodata = src.nodata
+
+if nodata is not None:
+    missing_mask = (data == nodata) | np.isnan(data)
+else:
+    missing_mask = np.isnan(data)
+
+missing_count = np.count_nonzero(missing_mask)
+total_count = data.size
+
+print(f"Total pixels (all bands): {total_count}")
+print(f"Missing pixels (all bands): {missing_count}")
+print("Any missing data?", missing_count > 0)
+
