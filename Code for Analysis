@@ -1,0 +1,198 @@
+# 1st analysis: To identify temporal change and measure it
+!pip install pymannkendall
+!pip install cftime
+
+import numpy as np
+import xarray as xr
+import pandas as pd
+import pymannkendall as mk
+
+# New NDVI path (already filled)
+path = "/content/drive/MyDrive/earthengine/SONADIA_ANNUAL_MEAN_NDVI_2000_2024_250m_filled.tif"
+
+# Open TIFF as DataArray: dims ('band','y','x')
+da = xr.open_dataarray(path, engine="rasterio")  # [web:34][web:31]
+
+# Time coord: here each band is one YEAR from 2000 to 2024
+n_time = da.sizes["band"]
+start_year = 2000
+time = pd.date_range(f"{start_year}-01-01", periods=n_time, freq="AS")  # one stamp per year
+da = da.assign_coords(band=time).rename(band="time")
+
+# Basin-mean annual NDVI series (already annual means in file)
+basin_ts_annual = da.mean(dim=("y", "x"), skipna=True)  # 1D over time [web:21]
+
+# Extract values and remove any remaining NaNs
+y = basin_ts_annual.values
+mask = np.isfinite(y)
+y_clean = y[mask]
+
+# Mann–Kendall test + Sen's slope
+result = mk.original_test(y_clean)  # [web:26][web:29]
+
+print("Years:", time[mask][0].year, "to", time[mask][-1].year)
+print("Trend:", result.trend)                 # 'increasing', 'decreasing', or 'no trend'
+print("h (significant?):", result.h)          # True if significant at default alpha=0.05
+print("p-value:", result.p)
+print("Tau:", result.Tau)
+print("Z:", result.z)
+print("Sen's slope (NDVI units/year):", result.slope)
+print("Intercept:", result.intercept)
+
+# 2nd analysis: To identify spatial analysis
+!pip install cartopy
+
+import numpy as np
+import rasterio
+from scipy.stats import kendalltau, theilslopes
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from rasterio.mask import mask
+import geopandas as gpd
+import cartopy.crs as ccrs
+from rasterio.io import MemoryFile
+
+# Paths
+tif_path = "/content/drive/MyDrive/earthengine/SONADIA_ANNUAL_MEAN_NDVI_2000_2024_250m_filled.tif"
+sonadia_geojson = "/content/drive/MyDrive/EarthEngineExports/Sonadia_Island_GeoJSON.geojson"
+
+# ---------- Load data ----------
+with rasterio.open(tif_path) as src:
+    height, width = src.height, src.width
+    n_bands = src.count              # annual bands
+    data = src.read()                # (time, y, x)
+    transform = src.transform
+    nodata = src.nodata
+    base_profile = src.profile
+    base_bounds = src.bounds         # for map extent (EPSG:4326 assumed)
+
+if nodata is None:
+    nodata = np.nan
+data = np.where(data == nodata, np.nan, data)
+
+print(f"Data shape: {data.shape}")
+time = np.arange(n_bands, dtype=float)   # 0..N-1, each step = 1 year
+
+# ---------- Compute per-pixel MK + Sen (per year) ----------
+sen_slope_year = np.full((height, width), np.nan, dtype=float)
+mk_z = np.full((height, width), np.nan, dtype=float)
+
+print("Computing per-pixel MK + Sen's slope (per year)...")
+
+for i in tqdm(range(height)):
+    row_ts = data[:, i, :]                 # (T, W)
+    nan_counts = np.isnan(row_ts).sum(axis=0)
+    valid_cols = np.where(nan_counts <= n_bands * 0.5)[0]
+    if valid_cols.size == 0:
+        continue
+
+    for j in valid_cols:
+        ts = row_ts[:, j]
+        valid_mask = ~np.isnan(ts)
+        y = ts[valid_mask]
+        t = time[valid_mask]
+
+        if y.size < 3:
+            continue
+
+        # MK via Kendall's tau
+        tau, _ = kendalltau(t, y)
+
+        n = y.size
+        var_s = (n * (n - 1) * (2 * n + 5)) / 18.0
+        S = tau * n * (n - 1) / 2.0
+
+        if S > 0:
+            Z = (S - 1) / np.sqrt(var_s)
+        elif S < 0:
+            Z = (S + 1) / np.sqrt(var_s)
+        else:
+            Z = 0.0
+        mk_z[i, j] = Z
+
+        # Sen's slope via SciPy (per year)
+        slope, _, _, _ = theilslopes(y, t)
+        sen_slope_year[i, j] = slope
+
+# ---------- Mask to Sonadia Island polygon ----------
+gdf_sonadia = gpd.read_file(sonadia_geojson)
+gdf_sonadia = gdf_sonadia.to_crs(base_profile["crs"])
+sonadia_shapes = list(gdf_sonadia.geometry)
+
+def mask_array_with_polygon(arr2d, profile, shapes):
+    h, w = arr2d.shape
+    mem_profile = profile.copy()
+    mem_profile.update(
+        height=h,
+        width=w,
+        count=1,
+        dtype=arr2d.dtype,
+        transform=transform
+    )
+    with MemoryFile() as memfile:
+        with memfile.open(**mem_profile) as dst:
+            dst.write(arr2d, 1)
+        with memfile.open() as src_mem:
+            masked, masked_transform = mask(
+                src_mem,
+                shapes,
+                crop=False,
+                filled=True,
+                nodata=np.nan
+            )
+    return masked[0], masked_transform
+
+sen_sonadia, sen_sonadia_transform = mask_array_with_polygon(sen_slope_year, base_profile, sonadia_shapes)
+mkz_sonadia, mkz_sonadia_transform = mask_array_with_polygon(mk_z, base_profile, sonadia_shapes)
+
+
+lon_min, lat_min, lon_max, lat_max = base_bounds.left, base_bounds.bottom, base_bounds.right, base_bounds.top
+extent = [lon_min, lon_max, lat_min, lat_max]
+
+fig = plt.figure(figsize=(14, 6))
+proj = ccrs.PlateCarree()
+
+# Map 1: Sen's slope per year
+ax1 = plt.subplot(1, 2, 1, projection=proj)
+v = np.nanpercentile(np.abs(sen_sonadia), 98)
+im1 = ax1.imshow(
+    sen_sonadia,
+    extent=extent,
+    origin="upper",
+    cmap="RdBu_r",
+    vmin=-v,
+    vmax=v,
+    transform=proj,
+    zorder=0
+)
+# With these lines (adds 0.01 degree buffer):
+zoom_extent = [lon_min-0.01, lon_max+0.01, lat_min-0.01, lat_max+0.01]
+ax1.set_extent(zoom_extent, crs=proj)
+
+cb1 = plt.colorbar(im1, ax=ax1, shrink=0.7, label="Sen's slope (NDVI per year)")
+ax1.set_title("NDVI Trend Magnitude (Sen's Slope per Year)")
+
+# Map 2: MK Z-score
+ax2 = plt.subplot(1, 2, 2, projection=proj)
+im2 = ax2.imshow(
+    mkz_sonadia,
+    extent=extent,
+    origin="upper",
+    cmap="RdBu_r",
+    vmin=-4,
+    vmax=4,
+    transform=proj,
+    zorder=0
+)
+# With these lines (adds 0.01 degree buffer):
+zoom_extent = [lon_min-0.01, lon_max+0.01, lat_min-0.01, lat_max+0.01]
+
+ax2.set_extent(zoom_extent, crs=proj)
+
+cb2 = plt.colorbar(im2, ax=ax2, shrink=0.7, label="MK Z-score")
+ax2.set_title("NDVI Trend Significance (MK Z‑Score)")
+
+plt.tight_layout()
+plt.show()
+
+
